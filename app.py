@@ -5,13 +5,22 @@
 import sys
 import os
 
-# Check if we're running on Vercel
-is_vercel = os.getenv('VERCEL') == '1'
+# Check if we're running on Vercel (check multiple env vars)
+is_vercel = os.getenv('VERCEL') == '1' or os.getenv('VERCEL_ENV') or os.getenv('HOSTNAME', '').endswith('vercel.app')
+
+# Debug: print environment
+print(f"[DEBUG] is_vercel: {is_vercel}")
+print(f"[DEBUG] VERCEL env: {os.getenv('VERCEL')}")
+print(f"[DEBUG] MONGODB_URI exists: {bool(os.getenv('MONGODB_URI'))}")
 
 if not is_vercel:
     # Local development: use virtual filesystem
-    import virtual_storage
-    virtual_storage.activate()
+    try:
+        import virtual_storage
+        virtual_storage.activate()
+    except Exception as e:
+        print(f"[WARNING] Virtual filesystem failed: {e}")
+        is_vercel = True  # Fall back to direct MongoDB
 
 # ============================================================================
 # Now import everything else normally
@@ -54,21 +63,24 @@ def get_db():
     """Get MongoDB database instance (reuse connection)"""
     global _mongo_client, _mongo_db
     
-    if _mongo_db is not None:
-        return _mongo_db
+    # Always create fresh connection if None (don't cache in Vercel)
+    if _mongo_db is None:
+        uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+        db_name = os.getenv('MONGODB_DB_NAME', 'ems_database')
+        
+        print(f"[DEBUG] Connecting to MongoDB: {uri[:50]}...")
+        
+        try:
+            _mongo_client = MongoClient(uri, maxPoolSize=50, minPoolSize=1, serverSelectionTimeoutMS=10000, connectTimeoutMS=10000)
+            _mongo_client.admin.command('ping')
+            _mongo_db = _mongo_client[db_name]
+            print(f"✓ MongoDB connected (pooled) - {db_name}")
+        except Exception as e:
+            print(f"✗ MongoDB connection failed: {e}")
+            _mongo_db = None
+            return None
     
-    uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
-    db_name = os.getenv('MONGODB_DB_NAME', 'ems_database')
-    
-    try:
-        _mongo_client = MongoClient(uri, maxPoolSize=50, minPoolSize=1, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
-        _mongo_client.admin.command('ping')
-        _mongo_db = _mongo_client[db_name]
-        print(f"✓ MongoDB connected (pooled)")
-        return _mongo_db
-    except Exception as e:
-        print(f"✗ MongoDB connection failed: {e}")
-        return None
+    return _mongo_db
 
 # Load configuration (config.json is NOT virtual, so this works normally)
 def load_config():
@@ -94,7 +106,9 @@ ADMIN_SETTINGS_FILE = 'data/admin_settings.json'
 def read_json(filename):
     if is_vercel:
         # Vercel: read directly from MongoDB
-        return _read_from_mongodb(filename)
+        result = _read_from_mongodb(filename)
+        print(f"[DEBUG] Read {filename}: {type(result)} keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+        return result
     else:
         # Local: use virtual filesystem
         if not os.path.exists(filename):
@@ -105,6 +119,7 @@ def read_json(filename):
 def write_json(filename, data):
     if is_vercel:
         # Vercel: write directly to MongoDB
+        print(f"[DEBUG] Writing {filename} to MongoDB")
         _write_to_mongodb(filename, data)
     else:
         # Local: use virtual filesystem
@@ -118,12 +133,14 @@ def _read_from_mongodb(filename):
     
     # Check cache first
     if filename in _cache:
+        print(f"[DEBUG] Cache hit for {filename}")
         return _cache[filename].copy()
     
     try:
         db = get_db()
         if db is None:
-            return {}
+            print(f"[ERROR] No database connection for {filename}")
+            return _get_default_data(filename)
         
         # Map filename to collection
         collection_map = {
@@ -136,18 +153,39 @@ def _read_from_mongodb(filename):
         
         collection_name = collection_map.get(filename)
         if not collection_name:
+            print(f"[ERROR] Unknown collection for {filename}")
             return {}
         
+        print(f"[DEBUG] Reading from collection: {collection_name}")
         doc = db[collection_name].find_one()
+        
         if doc:
             doc.pop('_id', None)
             # Cache the result
             _cache[filename] = doc.copy()
+            print(f"[DEBUG] Found data in {collection_name}: {list(doc.keys())}")
             return doc
-        return {}
+        else:
+            print(f"[DEBUG] No data in {collection_name}, returning default")
+            default = _get_default_data(filename)
+            _cache[filename] = default.copy()
+            return default
     except Exception as e:
-        print(f"Error reading from MongoDB: {e}")
-        return {}
+        print(f"[ERROR] Error reading from MongoDB for {filename}: {e}")
+        import traceback
+        traceback.print_exc()
+        return _get_default_data(filename)
+
+def _get_default_data(filename):
+    """Return default empty structure for a file"""
+    defaults = {
+        'data/users.json': {'users': []},
+        'data/admins.json': {'admins': []},
+        'data/time_entries.json': {'entries': []},
+        'data/message.json': {'message': ''},
+        'data/admin_settings.json': {}
+    }
+    return defaults.get(filename, {})
 
 def _write_to_mongodb(filename, data):
     """Write data directly to MongoDB (clear cache after write)"""
@@ -156,6 +194,7 @@ def _write_to_mongodb(filename, data):
     try:
         db = get_db()
         if db is None:
+            print(f"[ERROR] No database connection for writing {filename}")
             return
         
         # Map filename to collection
@@ -169,16 +208,21 @@ def _write_to_mongodb(filename, data):
         
         collection_name = collection_map.get(filename)
         if not collection_name:
+            print(f"[ERROR] Unknown collection for {filename}")
             return
         
+        print(f"[DEBUG] Writing to collection: {collection_name}")
         db[collection_name].delete_many({})
-        db[collection_name].insert_one(data)
+        result = db[collection_name].insert_one(data)
+        print(f"[DEBUG] Inserted document: {result.inserted_id}")
         
         # Invalidate cache for this file
         if filename in _cache:
             del _cache[filename]
     except Exception as e:
-        print(f"Error writing to MongoDB: {e}")
+        print(f"[ERROR] Error writing to MongoDB for {filename}: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 
