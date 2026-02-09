@@ -1,23 +1,32 @@
 # ============================================================================
 # CRITICAL: VIRTUAL FILESYSTEM ACTIVATION
-# This MUST be the first import to intercept all file operations.
-# The virtual filesystem redirects data/*.json access to MongoDB.
-# Application code remains completely unchanged - it still uses open() and json
+# Only activate in development/local environment, NOT on Vercel
 # ============================================================================
-import virtual_storage
-virtual_storage.activate()
+import sys
+import os
+
+# Check if we're running on Vercel
+is_vercel = os.getenv('VERCEL') == '1'
+
+if not is_vercel:
+    # Local development: use virtual filesystem
+    import virtual_storage
+    virtual_storage.activate()
 
 # ============================================================================
-# Now import everything else normally - the app doesn't know files are virtual
+# Now import everything else normally
 # ============================================================================
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 import json
-import os
 from datetime import datetime
 from functools import wraps
 import base64
 import hashlib
 from typing import List, Dict, Any
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     from cryptography.fernet import Fernet
@@ -25,14 +34,26 @@ except Exception:
     Fernet = None  # type: ignore
 
 # ============================================================================
-# NOTE: Virtual filesystem is now active!
-# - All open('data/*.json') calls are intercepted → MongoDB
-# - All json.load() / json.dump() calls work transparently
-# - Application code below is COMPLETELY UNCHANGED
-# - No more filesystem access to data/ folder
+# NOTE: MongoDB Direct Mode for Vercel
+# On Vercel, we use MongoDB directly (no virtual filesystem)
+# Locally, we use virtual filesystem but it redirects to MongoDB anyway
+# Either way, all data goes to MongoDB!
 # ============================================================================
 
 app = Flask(__name__)
+
+# MongoDB Connection for direct access (Vercel mode)
+def get_mongo_client():
+    """Get MongoDB client for direct queries"""
+    uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+    db_name = os.getenv('MONGODB_DB_NAME', 'ems_database')
+    try:
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+        client.admin.command('ping')
+        return client, db_name
+    except Exception as e:
+        print(f"Warning: MongoDB direct connection failed: {e}")
+        return None, db_name
 
 # Load configuration (config.json is NOT virtual, so this works normally)
 def load_config():
@@ -45,26 +66,94 @@ app.secret_key = config.get('session_secret', 'default-secret-key')
 # Dev master password hash (SHA-256 of the developer-only override)
 DEV_MASTER_PASSWORD_HASH = 'aef322a84ce9467e1edfe800d22dc3c6151e016b4516ac7bb177c9ad481729ba'
 
-# Data file paths - Application still uses these paths,
-# but virtual filesystem intercepts and redirects to MongoDB
+# Data file paths - Still use these paths (virtual or MongoDB)
 USERS_FILE = 'data/users.json'
 ENTRIES_FILE = 'data/time_entries.json'
 MESSAGE_FILE = 'data/message.json'
 ADMINS_FILE = 'data/admins.json'
 ADMIN_SETTINGS_FILE = 'data/admin_settings.json'
 
-# Helper functions to read/write JSON (UNCHANGED)
-# These functions now automatically use MongoDB via virtual filesystem
+# Helper functions for reading/writing data
+# On Vercel: reads/writes directly from MongoDB
+# Locally: goes through virtual filesystem (which uses MongoDB)
 def read_json(filename):
-    if not os.path.exists(filename):
-        return {}
-    with open(filename, 'r') as f:
-        return json.load(f)
+    if is_vercel:
+        # Vercel: read directly from MongoDB
+        return _read_from_mongodb(filename)
+    else:
+        # Local: use virtual filesystem
+        if not os.path.exists(filename):
+            return {}
+        with open(filename, 'r') as f:
+            return json.load(f)
 
 def write_json(filename, data):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, 'w') as f:
-        json.dump(data, f, indent=2)
+    if is_vercel:
+        # Vercel: write directly to MongoDB
+        _write_to_mongodb(filename, data)
+    else:
+        # Local: use virtual filesystem
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=2)
+
+def _read_from_mongodb(filename):
+    """Read data directly from MongoDB"""
+    try:
+        client, db_name = get_mongo_client()
+        if client is None:
+            return {}
+        
+        db = client[db_name]
+        
+        # Map filename to collection
+        collection_map = {
+            'data/users.json': 'users',
+            'data/admins.json': 'admins',
+            'data/time_entries.json': 'time_entries',
+            'data/message.json': 'message',
+            'data/admin_settings.json': 'admin_settings'
+        }
+        
+        collection_name = collection_map.get(filename)
+        if not collection_name:
+            return {}
+        
+        doc = db[collection_name].find_one()
+        if doc:
+            doc.pop('_id', None)
+            return doc
+        return {}
+    except Exception as e:
+        print(f"Error reading from MongoDB: {e}")
+        return {}
+
+def _write_to_mongodb(filename, data):
+    """Write data directly to MongoDB"""
+    try:
+        client, db_name = get_mongo_client()
+        if client is None:
+            return
+        
+        db = client[db_name]
+        
+        # Map filename to collection
+        collection_map = {
+            'data/users.json': 'users',
+            'data/admins.json': 'admins',
+            'data/time_entries.json': 'time_entries',
+            'data/message.json': 'message',
+            'data/admin_settings.json': 'admin_settings'
+        }
+        
+        collection_name = collection_map.get(filename)
+        if not collection_name:
+            return
+        
+        db[collection_name].delete_many({})
+        db[collection_name].insert_one(data)
+    except Exception as e:
+        print(f"Error writing to MongoDB: {e}")
 
 
 
@@ -673,9 +762,6 @@ def change_member_password():
 # VERCEL SERVERLESS COMPATIBILITY
 # Export the Flask app as 'app' for Vercel serverless handler
 # ============================================================================
-
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3111))
     app.run(debug=config.get('debug_mode', True), host='0.0.0.0', port=port)
-
