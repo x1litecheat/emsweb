@@ -42,18 +42,33 @@ except Exception:
 
 app = Flask(__name__)
 
-# MongoDB Connection for direct access (Vercel mode)
-def get_mongo_client():
-    """Get MongoDB client for direct queries"""
+# ============================================================================
+# GLOBAL MONGODB CLIENT (Connection Pooling)
+# Reuse connection across all requests for better performance
+# ============================================================================
+_mongo_client = None
+_mongo_db = None
+_cache = {}  # Simple in-memory cache
+
+def get_db():
+    """Get MongoDB database instance (reuse connection)"""
+    global _mongo_client, _mongo_db
+    
+    if _mongo_db is not None:
+        return _mongo_db
+    
     uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
     db_name = os.getenv('MONGODB_DB_NAME', 'ems_database')
+    
     try:
-        client = MongoClient(uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
-        client.admin.command('ping')
-        return client, db_name
+        _mongo_client = MongoClient(uri, maxPoolSize=50, minPoolSize=1, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+        _mongo_client.admin.command('ping')
+        _mongo_db = _mongo_client[db_name]
+        print(f"✓ MongoDB connected (pooled)")
+        return _mongo_db
     except Exception as e:
-        print(f"Warning: MongoDB direct connection failed: {e}")
-        return None, db_name
+        print(f"✗ MongoDB connection failed: {e}")
+        return None
 
 # Load configuration (config.json is NOT virtual, so this works normally)
 def load_config():
@@ -98,13 +113,17 @@ def write_json(filename, data):
             json.dump(data, f, indent=2)
 
 def _read_from_mongodb(filename):
-    """Read data directly from MongoDB"""
+    """Read data directly from MongoDB (with caching)"""
+    global _cache
+    
+    # Check cache first
+    if filename in _cache:
+        return _cache[filename].copy()
+    
     try:
-        client, db_name = get_mongo_client()
-        if client is None:
+        db = get_db()
+        if db is None:
             return {}
-        
-        db = client[db_name]
         
         # Map filename to collection
         collection_map = {
@@ -122,6 +141,8 @@ def _read_from_mongodb(filename):
         doc = db[collection_name].find_one()
         if doc:
             doc.pop('_id', None)
+            # Cache the result
+            _cache[filename] = doc.copy()
             return doc
         return {}
     except Exception as e:
@@ -129,13 +150,13 @@ def _read_from_mongodb(filename):
         return {}
 
 def _write_to_mongodb(filename, data):
-    """Write data directly to MongoDB"""
+    """Write data directly to MongoDB (clear cache after write)"""
+    global _cache
+    
     try:
-        client, db_name = get_mongo_client()
-        if client is None:
+        db = get_db()
+        if db is None:
             return
-        
-        db = client[db_name]
         
         # Map filename to collection
         collection_map = {
@@ -152,6 +173,10 @@ def _write_to_mongodb(filename, data):
         
         db[collection_name].delete_many({})
         db[collection_name].insert_one(data)
+        
+        # Invalidate cache for this file
+        if filename in _cache:
+            del _cache[filename]
     except Exception as e:
         print(f"Error writing to MongoDB: {e}")
 
