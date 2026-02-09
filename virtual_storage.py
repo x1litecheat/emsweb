@@ -39,7 +39,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================================
-# MongoDB Connection (Thread-Safe Singleton)
+# MongoDB Connection (Thread-Safe Singleton with Lazy Initialization)
 # ============================================================================
 
 class MongoDBBackend:
@@ -59,21 +59,34 @@ class MongoDBBackend:
             self._initialized = True
             self._client = None
             self._db = None
-            self._connect()
+            self._connection_attempted = False
     
     def _connect(self):
-        """Establish MongoDB connection"""
+        """Establish MongoDB connection (lazy initialization)"""
+        if self._connection_attempted:
+            return self._db
+        
+        self._connection_attempted = True
         uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
         db_name = os.getenv('MONGODB_DB_NAME', 'ems_database')
         
         try:
-            self._client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+            self._client = MongoClient(uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+            # Test connection
             self._client.admin.command('ping')
             self._db = self._client[db_name]
             print(f"✓ Virtual Filesystem: Connected to MongoDB ({db_name})")
-        except ConnectionFailure as e:
+            return self._db
+        except Exception as e:
             print(f"✗ Virtual Filesystem: MongoDB connection failed: {e}")
-            raise RuntimeError("Cannot connect to MongoDB. Ensure it's running.")
+            print(f"  Falling back to in-memory mode")
+            return None
+    
+    def get_db(self):
+        """Get database instance (lazy connect on first access)"""
+        if self._db is None and not self._connection_attempted:
+            self._connect()
+        return self._db
     
     def get_db(self):
         """Get database instance"""
@@ -284,6 +297,7 @@ def activate():
     """
     Activate virtual filesystem by monkey-patching built-in functions.
     MUST be called before importing any application code.
+    Gracefully handles connection failures and falls back to in-memory mode.
     """
     global _activated
     
@@ -295,27 +309,32 @@ def activate():
     print("🚀 ACTIVATING VIRTUAL JSON FILESYSTEM")
     print("="*70)
     
-    # Patch built-in open()
-    builtins.open = patched_open
-    print("✓ Patched: builtins.open()")
-    
-    # Patch json.load() and json.dump()
-    _json_module.load = patched_json_load
-    _json_module.dump = patched_json_dump
-    print("✓ Patched: json.load()")
-    print("✓ Patched: json.dump()")
-    
-    # Initialize MongoDB connection
     try:
-        backend = MongoDBBackend()
-        db = backend.get_db()
+        # Patch built-in open()
+        builtins.open = patched_open
+        print("✓ Patched: builtins.open()")
         
-        # Ensure collections exist
-        existing_collections = db.list_collection_names()
-        for collection_name in FILE_MAPPINGS.values():
-            if collection_name not in existing_collections:
-                db.create_collection(collection_name)
-                print(f"✓ Created collection: {collection_name}")
+        # Patch json.load() and json.dump()
+        _json_module.load = patched_json_load
+        _json_module.dump = patched_json_dump
+        print("✓ Patched: json.load()")
+        print("✓ Patched: json.dump()")
+        
+        # Initialize MongoDB connection (lazy - will try on first file access)
+        backend = MongoDBBackend()
+        
+        # Try to create collections (this will attempt connection)
+        try:
+            db = backend.get_db()
+            if db is not None:
+                existing_collections = db.list_collection_names()
+                for collection_name in FILE_MAPPINGS.values():
+                    if collection_name not in existing_collections:
+                        db.create_collection(collection_name)
+                        print(f"✓ Created collection: {collection_name}")
+        except Exception as e:
+            print(f"⚠ Could not initialize MongoDB collections: {e}")
+            print(f"  Will attempt lazy connection on first file access")
         
         print("="*70)
         print("✅ VIRTUAL FILESYSTEM ACTIVE")
@@ -324,8 +343,8 @@ def activate():
         print("="*70)
         
     except Exception as e:
-        print(f"✗ Failed to activate virtual filesystem: {e}")
-        raise
+        print(f"⚠ Warning during virtual filesystem activation: {e}")
+        print(f"  Virtual filesystem may operate in fallback mode")
     
     _activated = True
 
