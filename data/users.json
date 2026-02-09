@@ -1,0 +1,22 @@
+{
+  "users": [
+    {
+      "callsign": "001",
+      "id": 3,
+      "name": "001 | Hasan",
+      "password": "1122",
+      "postname": "Intern",
+      "role": "member",
+      "username": "hasan"
+    },
+    {
+      "callsign": "301",
+      "id": 4,
+      "name": "301 | Love Jack",
+      "password": "1122",
+      "postname": "Doctor",
+      "role": "member",
+      "username": "jack"
+    }
+  ]
+}

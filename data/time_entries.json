@@ -1,0 +1,24 @@
+{
+  "entries": [
+    {
+      "date": "19-01-2026",
+      "id": 3,
+      "member_id": 4,
+      "member_name": "301 | Love Jack",
+      "out_of_service": "0",
+      "time_in": "12:00 PM",
+      "time_out": "12:00 AM",
+      "total_hours": "12:00"
+    },
+    {
+      "date": "03-01-2026",
+      "id": 4,
+      "member_id": 4,
+      "member_name": "301 | Love Jack",
+      "out_of_service": "0",
+      "time_in": "12:00 PM",
+      "time_out": "12:45 AM",
+      "total_hours": "12:45"
+    }
+  ]
+}

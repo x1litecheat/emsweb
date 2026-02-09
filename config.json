@@ -1,0 +1,6 @@
+{
+  "app_name": "EMS TOGGLE DUTY",
+  "company_name": "BPR",
+  "session_secret": "your-secret-key-change-this",
+  "debug_mode": true
+}

@@ -1,0 +1,20 @@
+{
+  "admins": [
+    {
+      "id": 1,
+      "name": "Administrator",
+      "password": "1212",
+      "permanent": true,
+      "role": "boss",
+      "username": "boss"
+    },
+    {
+      "id": 3,
+      "name": "JOY",
+      "password": "1122",
+      "permanent": false,
+      "role": "manager",
+      "username": "joy"
+    }
+  ]
+}
