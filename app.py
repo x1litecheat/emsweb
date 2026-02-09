@@ -673,13 +673,9 @@ def change_member_password():
 # VERCEL SERVERLESS COMPATIBILITY
 # Export the Flask app as 'app' for Vercel serverless handler
 # ============================================================================
-if __name__ == '__main__':
-    # Local development: run on 127.0.0.1:3111
-    app.run(host='127.0.0.1', port=3111, debug=True)
-else:
-    # Vercel/serverless: export as WSGI application
-    pass
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3111))
     app.run(debug=config.get('debug_mode', True), host='0.0.0.0', port=port)
+
